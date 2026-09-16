@@ -24,14 +24,17 @@ import (
 
 	log "github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/discovery"
 	kubeinformers "k8s.io/client-go/informers"
 	coreinformers "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	v1 "sigs.k8s.io/gateway-api/apis/v1"
+	"sigs.k8s.io/gateway-api/apis/v1alpha2"
 	gateway "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
 	gwinformers "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions"
 	informers_v1 "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions/apis/v1"
@@ -71,6 +74,25 @@ type newGatewayRouteInformerFunc func(gwinformers.SharedInformerFactory) gateway
 type gatewayRouteInformer interface {
 	List(namespace string, selector labels.Selector) ([]gatewayRoute, error)
 	Informer() cache.SharedIndexInformer
+}
+
+func findServedGatewayRouteGroupVersion(discoveryClient discovery.DiscoveryInterface, resourceName string) (metav1.GroupVersion, error) {
+	groupVersions := []metav1.GroupVersion{v1.GroupVersion, v1alpha2.GroupVersion}
+	for _, groupVersion := range groupVersions {
+		apiResourceList, err := discoveryClient.ServerResourcesForGroupVersion(groupVersion.String())
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return metav1.GroupVersion{}, fmt.Errorf("discover Gateway API resources at %s: %w", groupVersion.String(), err)
+		}
+		for _, apiResource := range apiResourceList.APIResources {
+			if apiResource.Name == resourceName {
+				return groupVersion, nil
+			}
+		}
+	}
+	return metav1.GroupVersion{}, fmt.Errorf("gateway API resource %q is not served at %s or %s", resourceName, v1.GroupVersion.String(), v1alpha2.GroupVersion.String())
 }
 
 func newGatewayInformerFactory(client gateway.Interface, namespace string, labelSelector labels.Selector) gwinformers.SharedInformerFactory {

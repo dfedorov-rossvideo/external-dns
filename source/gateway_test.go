@@ -17,11 +17,71 @@ limitations under the License.
 package source
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	discoveryfake "k8s.io/client-go/discovery/fake"
+	kubefake "k8s.io/client-go/kubernetes/fake"
+	clientgotesting "k8s.io/client-go/testing"
 	v1 "sigs.k8s.io/gateway-api/apis/v1"
+	"sigs.k8s.io/gateway-api/apis/v1alpha2"
 )
+
+func setFakeGatewayRouteDiscoveryResources(kubeClient *kubefake.Clientset, resourceName string, groupVersions ...metav1.GroupVersion) {
+	apiResourceLists := make([]*metav1.APIResourceList, 0, len(groupVersions))
+	for _, groupVersion := range groupVersions {
+		apiResourceLists = append(apiResourceLists, &metav1.APIResourceList{
+			GroupVersion: groupVersion.String(),
+			APIResources: []metav1.APIResource{{Name: resourceName}},
+		})
+	}
+	kubeClient.Discovery().(*discoveryfake.FakeDiscovery).Resources = apiResourceLists
+}
+
+func TestFindServedGatewayRouteGroupVersionPrefersV1(t *testing.T) {
+	kubeClient := kubefake.NewClientset()
+	setFakeGatewayRouteDiscoveryResources(kubeClient, "tcproutes", v1.GroupVersion, v1alpha2.GroupVersion)
+
+	groupVersion, err := findServedGatewayRouteGroupVersion(kubeClient.Discovery(), "tcproutes")
+
+	require.NoError(t, err)
+	require.Equal(t, v1.GroupVersion, groupVersion)
+}
+
+func TestFindServedGatewayRouteGroupVersionFallsBackToV1alpha2(t *testing.T) {
+	kubeClient := kubefake.NewClientset()
+	setFakeGatewayRouteDiscoveryResources(kubeClient, "tcproutes", v1alpha2.GroupVersion)
+
+	groupVersion, err := findServedGatewayRouteGroupVersion(kubeClient.Discovery(), "tcproutes")
+
+	require.NoError(t, err)
+	require.Equal(t, v1alpha2.GroupVersion, groupVersion)
+}
+
+func TestFindServedGatewayRouteGroupVersionRejectsMissingResource(t *testing.T) {
+	kubeClient := kubefake.NewClientset()
+	setFakeGatewayRouteDiscoveryResources(kubeClient, "httproutes", v1.GroupVersion, v1alpha2.GroupVersion)
+
+	_, err := findServedGatewayRouteGroupVersion(kubeClient.Discovery(), "tcproutes")
+
+	require.EqualError(t, err, `gateway API resource "tcproutes" is not served at gateway.networking.k8s.io/v1 or gateway.networking.k8s.io/v1alpha2`)
+}
+
+func TestFindServedGatewayRouteGroupVersionReturnsDiscoveryError(t *testing.T) {
+	kubeClient := kubefake.NewClientset()
+	fakeDiscovery := kubeClient.Discovery().(*discoveryfake.FakeDiscovery)
+	fakeDiscovery.PrependReactor("get", "resource", func(clientgotesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("discovery unavailable")
+	})
+
+	_, err := findServedGatewayRouteGroupVersion(kubeClient.Discovery(), "tcproutes")
+
+	require.EqualError(t, err, "discover Gateway API resources at gateway.networking.k8s.io/v1: discovery unavailable")
+}
 
 func TestGatewayMatchingHost(t *testing.T) {
 	tests := []struct {

@@ -24,44 +24,94 @@ import (
 	v1 "sigs.k8s.io/gateway-api/apis/v1"
 	"sigs.k8s.io/gateway-api/apis/v1alpha2"
 	informers "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions"
-	informers_v1a2 "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions/apis/v1alpha2"
+	gatewayinformersv1 "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions/apis/v1"
+	gatewayinformersv1alpha2 "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions/apis/v1alpha2"
 )
 
 // NewGatewayTCPRouteSource creates a new Gateway TCPRoute source with the given config.
 func NewGatewayTCPRouteSource(ctx context.Context, clients ClientGenerator, config *Config) (Source, error) {
-	return newGatewayRouteSource(ctx, clients, config, "TCPRoute", func(factory informers.SharedInformerFactory) gatewayRouteInformer {
-		return &gatewayTCPRouteInformer{factory.Gateway().V1alpha2().TCPRoutes()}
-	})
-}
-
-type gatewayTCPRoute struct{ route v1alpha2.TCPRoute } // NOTE: Must update TypeMeta in List when changing the APIVersion.
-
-func (rt *gatewayTCPRoute) Object() kubeObject               { return &rt.route }
-func (rt *gatewayTCPRoute) Metadata() *metav1.ObjectMeta     { return &rt.route.ObjectMeta }
-func (rt *gatewayTCPRoute) Hostnames() []v1.Hostname         { return nil }
-func (rt *gatewayTCPRoute) ParentRefs() []v1.ParentReference { return rt.route.Spec.ParentRefs }
-func (rt *gatewayTCPRoute) Protocol() v1.ProtocolType        { return v1.TCPProtocolType }
-func (rt *gatewayTCPRoute) RouteStatus() v1.RouteStatus      { return rt.route.Status.RouteStatus }
-
-type gatewayTCPRouteInformer struct {
-	informers_v1a2.TCPRouteInformer
-}
-
-func (inf gatewayTCPRouteInformer) List(namespace string, selector labels.Selector) ([]gatewayRoute, error) {
-	list, err := inf.TCPRouteInformer.Lister().TCPRoutes(namespace).List(selector)
+	kubeClient, err := clients.KubeClient()
 	if err != nil {
 		return nil, err
 	}
-	routes := make([]gatewayRoute, len(list))
-	for i, rt := range list {
+	groupVersion, err := findServedGatewayRouteGroupVersion(kubeClient.Discovery(), "tcproutes")
+	if err != nil {
+		return nil, err
+	}
+	if groupVersion == v1.GroupVersion {
+		return newGatewayRouteSource(ctx, clients, config, "TCPRoute", func(factory informers.SharedInformerFactory) gatewayRouteInformer {
+			return &gatewayTCPRouteV1Informer{factory.Gateway().V1().TCPRoutes()}
+		})
+	}
+	return newGatewayRouteSource(ctx, clients, config, "TCPRoute", func(factory informers.SharedInformerFactory) gatewayRouteInformer {
+		return &gatewayTCPRouteV1alpha2Informer{factory.Gateway().V1alpha2().TCPRoutes()}
+	})
+}
+
+type gatewayTCPRouteV1 struct{ route v1.TCPRoute }
+
+func (route *gatewayTCPRouteV1) Object() kubeObject               { return &route.route }
+func (route *gatewayTCPRouteV1) Metadata() *metav1.ObjectMeta     { return &route.route.ObjectMeta }
+func (route *gatewayTCPRouteV1) Hostnames() []v1.Hostname         { return nil }
+func (route *gatewayTCPRouteV1) ParentRefs() []v1.ParentReference { return route.route.Spec.ParentRefs }
+func (route *gatewayTCPRouteV1) Protocol() v1.ProtocolType        { return v1.TCPProtocolType }
+func (route *gatewayTCPRouteV1) RouteStatus() v1.RouteStatus      { return route.route.Status.RouteStatus }
+
+type gatewayTCPRouteV1Informer struct {
+	gatewayinformersv1.TCPRouteInformer
+}
+
+func (informer gatewayTCPRouteV1Informer) List(namespace string, selector labels.Selector) ([]gatewayRoute, error) {
+	tcpRoutes, err := informer.TCPRouteInformer.Lister().TCPRoutes(namespace).List(selector)
+	if err != nil {
+		return nil, err
+	}
+	routes := make([]gatewayRoute, len(tcpRoutes))
+	for routeIndex, tcpRoute := range tcpRoutes {
 		// List results are supposed to be treated as read-only.
 		// We make a shallow copy since we're only interested in setting the TypeMeta.
-		clone := *rt
+		clone := *tcpRoute
+		clone.TypeMeta = metav1.TypeMeta{
+			APIVersion: v1.GroupVersion.String(),
+			Kind:       "TCPRoute",
+		}
+		routes[routeIndex] = &gatewayTCPRouteV1{clone}
+	}
+	return routes, nil
+}
+
+type gatewayTCPRouteV1alpha2 struct{ route v1alpha2.TCPRoute }
+
+func (route *gatewayTCPRouteV1alpha2) Object() kubeObject           { return &route.route }
+func (route *gatewayTCPRouteV1alpha2) Metadata() *metav1.ObjectMeta { return &route.route.ObjectMeta }
+func (route *gatewayTCPRouteV1alpha2) Hostnames() []v1.Hostname     { return nil }
+func (route *gatewayTCPRouteV1alpha2) ParentRefs() []v1.ParentReference {
+	return route.route.Spec.ParentRefs
+}
+func (route *gatewayTCPRouteV1alpha2) Protocol() v1.ProtocolType { return v1.TCPProtocolType }
+func (route *gatewayTCPRouteV1alpha2) RouteStatus() v1.RouteStatus {
+	return route.route.Status.RouteStatus
+}
+
+type gatewayTCPRouteV1alpha2Informer struct {
+	gatewayinformersv1alpha2.TCPRouteInformer
+}
+
+func (informer gatewayTCPRouteV1alpha2Informer) List(namespace string, selector labels.Selector) ([]gatewayRoute, error) {
+	tcpRoutes, err := informer.TCPRouteInformer.Lister().TCPRoutes(namespace).List(selector)
+	if err != nil {
+		return nil, err
+	}
+	routes := make([]gatewayRoute, len(tcpRoutes))
+	for routeIndex, tcpRoute := range tcpRoutes {
+		// List results are supposed to be treated as read-only.
+		// We make a shallow copy since we're only interested in setting the TypeMeta.
+		clone := *tcpRoute
 		clone.TypeMeta = metav1.TypeMeta{
 			APIVersion: v1alpha2.GroupVersion.String(),
 			Kind:       "TCPRoute",
 		}
-		routes[i] = &gatewayTCPRoute{clone}
+		routes[routeIndex] = &gatewayTCPRouteV1alpha2{clone}
 	}
 	return routes, nil
 }
