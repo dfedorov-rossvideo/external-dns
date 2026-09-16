@@ -15,7 +15,7 @@ This repository carries a temporary Ross Video patch for ExternalDNS Gateway API
 ## Downstream patch
 
 - Patch branch: `ross/v0.22.0-gateway-v1`
-- Reserved release tag: `v0.22.0-rv.1`
+- Reserved release tag: `v0.22.0-rv.2`
 - Tracking story: [VS-3429](https://rossvideo.atlassian.net/browse/VS-3429)
 - Reference change: [external-dns PR #6656](https://github.com/kubernetes-sigs/external-dns/pull/6656)
 - Reference commit: `1a1ead3dec04141ad35c1246ebbf49b81fe9d077`
@@ -25,9 +25,17 @@ The downstream patch ports only the TCPRoute and UDPRoute API-version behavior f
 `gateway.networking.k8s.io/v1`, retains `v1alpha2` as a legacy fallback, and preserves discovery failures instead of
 reporting authorization or transport failures as unsupported API versions.
 
+Release `v0.22.0-rv.2` also includes the scanner-required indirect dependency updates approved after the `v0.22.0-rv.1`
+candidate scan:
+
+- `golang.org/x/crypto` `v0.55.0` to `v0.56.0`
+- `google.golang.org/grpc` `v1.83.1` to `v1.83.2`
+
 Modified upstream files:
 
 - `docs/sources/gateway-api.md`
+- `go.mod`
+- `go.sum`
 - `source/gateway.go`
 - `source/gateway_test.go`
 - `source/gateway_tcproute.go`
