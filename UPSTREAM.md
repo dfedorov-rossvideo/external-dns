@@ -17,6 +17,7 @@ This repository carries a temporary Ross Video patch for ExternalDNS Gateway API
 - Patch branch: `ross/v0.22.0-gateway-v1`
 - Reserved release tag: `v0.22.0-rv.2`
 - Tracking story: [VS-3429](https://rossvideo.atlassian.net/browse/VS-3429)
+- Platform recovery document: `bespin-infra/docs/operations/gateway-api-v1-platform-recovery.md`
 - Reference change: [external-dns PR #6656](https://github.com/kubernetes-sigs/external-dns/pull/6656)
 - Reference commit: `1a1ead3dec04141ad35c1246ebbf49b81fe9d077`
 - Reference status: closed without merge, review approval, or successful upstream test evidence
