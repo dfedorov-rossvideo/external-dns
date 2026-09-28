@@ -66,14 +66,14 @@ type TXTRegistry struct {
 	oldOwnerID string
 
 	// existingTXTs is the TXT records that already exist in the zone so that
-	// ApplyChanges() can skip re-creating them. See the struct below for details.
+	// ApplyChanges() can skip duplicate creation and deletion of missing records.
 	existingTXTs *existingTXTs
 
 	// obsoleteTXTWarned dedups the legacy "cname-" alias warning to once per record per process.
 	obsoleteTXTWarned sets.Set[string]
 }
 
-// existingTXTs stores pre‑existing TXT records to avoid duplicate creation.
+// existingTXTs stores pre-existing TXT records to avoid duplicate creation and deletion of missing records.
 // It relies on the fact that Records() is always called **before** ApplyChanges()
 // within a single reconciliation cycle.
 type existingTXTs struct {
@@ -183,12 +183,6 @@ func (im *TXTRegistry) OwnerID() string {
 // If TXT records was created previously to indicate ownership its corresponding value
 // will be added to the endpoints Labels map
 func (im *TXTRegistry) Records(ctx context.Context) ([]*endpoint.Endpoint, error) {
-	// existingTXTs must always hold the latest TXT records, so it needs to be reset every time.
-	// Previously, it was reset with a defer after ApplyChanges, but ApplyChanges is not called
-	// when plan.HasChanges() is false (i.e., when there are no changes to apply).
-	// In that case, stale TXT record information could remain, so we reset it here instead.
-	im.existingTXTs.reset()
-
 	// If we have the zones cached AND we have refreshed the cache since the
 	// last given interval, then just use the cached results.
 	if im.recordsCache != nil && time.Since(im.recordsCacheRefreshTime) < im.cacheInterval {
@@ -200,6 +194,8 @@ func (im *TXTRegistry) Records(ctx context.Context) ([]*endpoint.Endpoint, error
 	if err != nil {
 		return nil, err
 	}
+	// Keep the TXT inventory paired with the record snapshot, including cache hits.
+	im.existingTXTs.reset()
 
 	endpoints := []*endpoint.Endpoint{}
 
@@ -377,10 +373,10 @@ func (im *TXTRegistry) ApplyChanges(ctx context.Context, changes *plan.Changes) 
 	}
 
 	for _, r := range filteredChanges.Delete {
-		// when we delete TXT records for which value has changed (due to new label) this would still work because
-		// !!! TXT record value is uniquely generated from the Labels of the endpoint. Hence old TXT record can be uniquely reconstructed
-		// !!! After migration to the new TXT registry format we can drop records in old format here!!!
-		filteredChanges.Delete = append(filteredChanges.Delete, im.generateTXTRecord(r)...)
+		// Ownership may come from a legacy TXT while the new-format TXT does not exist yet.
+		filteredChanges.Delete = append(filteredChanges.Delete, im.generateTXTRecordWithFilter(r, func(txt *endpoint.Endpoint) bool {
+			return !im.existingTXTs.isAbsent(txt)
+		})...)
 
 		if im.cacheInterval > 0 {
 			im.removeFromCache(r)
@@ -410,6 +406,10 @@ func (im *TXTRegistry) ApplyChanges(ctx context.Context, changes *plan.Changes) 
 	// when caching is enabled, disable the provider from using the cache
 	if im.cacheInterval > 0 {
 		ctx = context.WithValue(ctx, provider.RecordsContextKey, nil)
+	}
+	// Re-read both DNS records and TXT inventory after writes, including partial failures.
+	if filteredChanges.HasChanges() {
+		im.recordsCache = nil
 	}
 	return im.provider.ApplyChanges(ctx, filteredChanges)
 }

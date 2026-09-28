@@ -799,6 +799,9 @@ func testTXTRegistryApplyChangesWithPrefix(t *testing.T) {
 	})
 	r, _ := newRegistry(p, "txt.", "", "owner", time.Hour, "", []string{}, []string{}, false, nil, "")
 
+	_, readError := r.Records(ctx)
+	require.NoError(t, readError)
+
 	changes := &plan.Changes{
 		Create: []*endpoint.Endpoint{
 			newCNAMEEndpointWithOwnerResource("new-record-1.test-zone.example.org", "new-loadbalancer-1.lb.com", "owner", "ingress/default/my-ingress"),
@@ -990,6 +993,9 @@ func testTXTRegistryApplyChangesWithSuffix(t *testing.T) {
 	require.NoError(t, err)
 	r, _ := newRegistry(p, "", "-txt", "owner", time.Hour, "wildcard", []string{}, []string{}, false, nil, "")
 
+	_, readError := r.Records(ctx)
+	require.NoError(t, readError)
+
 	changes := &plan.Changes{
 		Create: []*endpoint.Endpoint{
 			newCNAMEEndpointWithOwnerResource("new-record-1.test-zone.example.org", "new-loadbalancer-1.lb.com", "owner", "ingress/default/my-ingress"),
@@ -1085,6 +1091,9 @@ func testTXTRegistryApplyChangesNoPrefix(t *testing.T) {
 	})
 	require.NoError(t, err)
 	r, _ := newRegistry(p, "", "", "owner", time.Hour, "", []string{}, []string{}, false, nil, "")
+
+	_, readError := r.Records(ctx)
+	require.NoError(t, readError)
 
 	changes := &plan.Changes{
 		Create: []*endpoint.Endpoint{
@@ -1457,6 +1466,9 @@ func TestNewTXTScheme(t *testing.T) {
 	})
 	require.NoError(t, err)
 	r, err := newRegistry(p, "", "", "owner", time.Hour, "", []string{}, []string{}, false, nil, "")
+	require.NoError(t, err)
+
+	_, err = r.Records(ctx)
 	require.NoError(t, err)
 
 	changes := &plan.Changes{
@@ -2287,6 +2299,9 @@ func TestTXTRegistryAliasARecordDeleteLeavesLegacyCNAME(t *testing.T) {
 	r, err := newRegistry(p, "", "", "owner", time.Hour, "", []string{endpoint.RecordTypeA}, []string{}, false, nil, "")
 	require.NoError(t, err)
 
+	_, err = r.Records(t.Context())
+	require.NoError(t, err)
+
 	var applied *plan.Changes
 	p.OnApplyChanges = func(_ context.Context, got *plan.Changes) { applied = got }
 
@@ -2296,4 +2311,113 @@ func TestTXTRegistryAliasARecordDeleteLeavesLegacyCNAME(t *testing.T) {
 	assert.NotNil(t, findEndpoint(applied.Delete, dnsName, endpoint.RecordTypeA), "the A ALIAS record itself must be deleted")
 	assert.NotNil(t, findEndpoint(applied.Delete, "a-alias.test-zone.example.org", endpoint.RecordTypeTXT), "the new a- ownership TXT must be deleted")
 	assert.Nil(t, findEndpoint(applied.Delete, "cname-alias.test-zone.example.org", endpoint.RecordTypeTXT), "the legacy cname- TXT should be kept")
+}
+
+func TestTXTRegistryDeletesLegacyAliasWithoutMissingTXT(t *testing.T) {
+	const dnsName = "alias.test-zone.example.org"
+	const owner = "\"heritage=external-dns,external-dns/owner=owner\""
+
+	for _, cacheInterval := range []time.Duration{0, time.Hour} {
+		for _, withATXT := range []bool{false, true} {
+			for _, setIdentifier := range []string{"", "weighted-alias"} {
+				t.Run(fmt.Sprintf("cache=%s/aTXT=%t/set=%s", cacheInterval, withATXT, setIdentifier), func(t *testing.T) {
+					dnsProvider := inmemory.NewInMemoryProvider()
+					require.NoError(t, dnsProvider.CreateZone(testZone))
+					legacyTXT := newTXTEndpointWithOwnedRecord("cname-alias.test-zone.example.org", owner, dnsName).
+						WithSetIdentifier(setIdentifier)
+					seed := []*endpoint.Endpoint{
+						newEndpointWithOwner(dnsName, "foo.eu-central-1.elb.amazonaws.com", endpoint.RecordTypeA, "").
+							WithAliasProperty(endpoint.AliasTrue).WithSetIdentifier(setIdentifier),
+						newEndpointWithOwner(dnsName, "foo.eu-central-1.elb.amazonaws.com", endpoint.RecordTypeAAAA, "").
+							WithAliasProperty(endpoint.AliasAAAA).WithSetIdentifier(setIdentifier),
+						newTXTEndpointWithOwnedRecord("aaaa-alias.test-zone.example.org", owner, dnsName).
+							WithSetIdentifier(setIdentifier),
+						legacyTXT,
+					}
+					expectedRemaining := []*endpoint.Endpoint{legacyTXT}
+					if setIdentifier != "" {
+						// A marker for a different routing-policy set must not authorize its deletion.
+						otherSetTXT := newTXTEndpointWithOwnedRecord("a-alias.test-zone.example.org", owner, dnsName).
+							WithSetIdentifier("other-alias")
+						seed = append(seed, otherSetTXT)
+						expectedRemaining = append(expectedRemaining, otherSetTXT)
+					}
+					if withATXT {
+						seed = append(seed, newTXTEndpointWithOwnedRecord("a-alias.test-zone.example.org", owner, dnsName).
+							WithSetIdentifier(setIdentifier))
+					}
+					require.NoError(t, dnsProvider.ApplyChanges(t.Context(), &plan.Changes{Create: seed}))
+					registry, err := newRegistry(dnsProvider, "", "", "owner", cacheInterval, "",
+						[]string{endpoint.RecordTypeA, endpoint.RecordTypeAAAA}, nil, false, nil, "")
+					require.NoError(t, err)
+
+					// Read twice to exercise a cache hit before the deletion plan.
+					_, err = registry.Records(t.Context())
+					require.NoError(t, err)
+					records, err := registry.Records(t.Context())
+					require.NoError(t, err)
+					calculated := (&plan.Plan{
+						Policies: []plan.Policy{&plan.SyncPolicy{}}, Current: records,
+						ManagedRecords: []string{endpoint.RecordTypeA, endpoint.RecordTypeAAAA}, OwnerID: "owner",
+					}).Calculate()
+					require.Len(t, calculated.Changes.Delete, 2)
+					require.Equal(t, "owner", calculated.Changes.Delete[0].Labels[endpoint.OwnerLabelKey])
+					require.NoError(t, registry.ApplyChanges(t.Context(), calculated.Changes))
+
+					remaining, err := dnsProvider.Records(t.Context())
+					require.NoError(t, err)
+					assert.ElementsMatch(t, expectedRemaining, remaining)
+					records, err = registry.Records(t.Context())
+					require.NoError(t, err)
+					assert.Empty(t, records)
+				})
+			}
+		}
+	}
+}
+
+func TestTXTRegistryRefreshesTXTInventoryAfterCreateAndDelete(t *testing.T) {
+	for _, cacheInterval := range []time.Duration{0, time.Hour} {
+		t.Run(cacheInterval.String(), func(t *testing.T) {
+			dnsProvider := inmemory.NewInMemoryProvider()
+			require.NoError(t, dnsProvider.CreateZone(testZone))
+			registry, err := newRegistry(dnsProvider, "", "", "owner", cacheInterval, "",
+				[]string{endpoint.RecordTypeA}, nil, false, nil, "")
+			require.NoError(t, err)
+			for range 2 {
+				records, err := registry.Records(t.Context())
+				require.NoError(t, err)
+				require.Empty(t, records)
+				alias := newEndpointWithOwner("alias.test-zone.example.org", "foo.elb.amazonaws.com", endpoint.RecordTypeA, "").
+					WithAliasProperty(endpoint.AliasTrue)
+				require.NoError(t, registry.ApplyChanges(t.Context(), &plan.Changes{Create: []*endpoint.Endpoint{alias}}))
+				records, err = registry.Records(t.Context())
+				require.NoError(t, err)
+				require.Len(t, records, 1)
+				require.NoError(t, registry.ApplyChanges(t.Context(), &plan.Changes{Delete: records}))
+				remaining, err := dnsProvider.Records(t.Context())
+				require.NoError(t, err)
+				assert.Empty(t, remaining, "the newly created TXT must be deleted with the alias")
+			}
+		})
+	}
+}
+
+func TestTXTRegistryRefreshesCacheAfterFailedChanges(t *testing.T) {
+	dnsProvider := inmemory.NewInMemoryProvider()
+	require.NoError(t, dnsProvider.CreateZone(testZone))
+	registry, err := newRegistry(dnsProvider, "", "", "owner", time.Hour, "",
+		[]string{endpoint.RecordTypeA}, nil, false, nil, "")
+	require.NoError(t, err)
+	_, err = registry.Records(t.Context())
+	require.NoError(t, err)
+
+	// Duplicate creates reject the whole batch after ApplyChanges has touched the cache.
+	alias := newEndpointWithOwner("alias.test-zone.example.org", "foo.elb.amazonaws.com", endpoint.RecordTypeA, "").
+		WithAliasProperty(endpoint.AliasTrue)
+	err = registry.ApplyChanges(t.Context(), &plan.Changes{Create: []*endpoint.Endpoint{alias, alias}})
+	require.Error(t, err)
+	records, err := registry.Records(t.Context())
+	require.NoError(t, err)
+	assert.Empty(t, records, "failed writes must not leave phantom records in the cache")
 }
