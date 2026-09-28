@@ -1,6 +1,6 @@
 # Downstream Source Lineage
 
-This repository carries a temporary Ross Video patch for ExternalDNS Gateway API route compatibility.
+This repository carries temporary Ross Video patches for ExternalDNS Gateway API route compatibility and TXT registry deletion.
 
 ## Upstream baseline
 
@@ -44,7 +44,21 @@ Modified upstream files:
 - `source/gateway_udproute.go`
 - `source/gateway_udproute_test.go`
 
+## Unreleased TXT registry fix
+
+Deleting an AWS A ALIAS before its legacy `cname-` ownership TXT has migrated to `a-` previously submitted a
+DELETE for the nonexistent `a-` TXT, causing Route53 to reject the batch. The downstream fix emits TXT deletions
+only for names and routing-policy set identifiers present in the registry's DNS snapshot. Legacy `cname-` cleanup
+remains unchanged; this patch does not delete those markers or change ownership selection.
+
+The TXT inventory survives cached reads. Writes invalidate the registry cache, including on provider errors, so the
+next reconciliation refreshes both records and TXT inventory. Unchanged reconciliations retain the configured cache.
+This trades one additional provider read after a write for a consistent snapshot without additional cache bookkeeping.
+
+Additional modified upstream files: `registry/txt/registry.go` and `registry/txt/registry_test.go`.
+
 ## Retirement
 
 Retire this fork after a tagged upstream ExternalDNS release contains equivalent Gateway API v1 TCPRoute and UDPRoute
-support and passes the downstream unit, image scan, EKS v1.6.1 Standard CRD, Route53, and MultiViewer acceptance gates.
+support and the TXT deletion fix, and passes the downstream unit, image scan, EKS v1.6.1 Standard CRD, Route53, and
+MultiViewer acceptance gates.
